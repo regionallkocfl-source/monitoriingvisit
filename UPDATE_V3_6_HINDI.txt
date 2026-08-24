@@ -1,0 +1,8 @@
+v3.6 PDF/PHOTO FIX
+
+1. Direct PDF A4 portrait width locked; scoring/meta/follow-up/sign-off tables now stay inside page.
+2. Photo Drive IDs are passed directly from upload to PDF generator.
+3. Old submissions still work using Photo URLs -> Drive ID fallback.
+4. Photos are embedded 2 per row with aspect ratio preserved and safe A4 sizing.
+5. One bad photo does not stop other photos or PDF generation; warning is written to Audit Log.
+6. Existing data is unchanged. Deploy a new web-app version after clasp push.

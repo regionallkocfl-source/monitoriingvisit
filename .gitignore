@@ -1,0 +1,8 @@
+.clasp.json
+.clasprc.json
+node_modules/
+.DS_Store
+*.log
+mobile-app/.gradle/
+mobile-app/local.properties
+mobile-app/**/build/

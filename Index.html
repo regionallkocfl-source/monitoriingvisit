@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b5cab">
+  <?!= include('CSS'); ?>
+</head>
+<body>
+  <div id="loading" class="loading hidden"><div class="spinner"></div><div id="loadingText">Working…</div></div>
+  <div id="toast" class="toast"></div>
+  <div id="modal" class="modal hidden" onclick="modalBackdrop(event)"><div id="modalBox" class="modal-box"></div></div>
+
+  <section id="loginPage" class="login-page">
+    <div class="login-shell">
+      <div class="brand-panel">
+        <div class="brand-mark">MW</div>
+        <h1>MoneyWise CFL &amp; Session Monitoring Visit</h1>
+        <p>Field Monitoring • CFL Visit • Session Quality • Reports</p>
+      </div>
+      <div class="login-card">
+        <h2>Sign in</h2>
+        <p class="muted">Area Manager, CBO or Admin</p>
+        <label>Consultant ID / Email
+          <input id="loginId" name="mw_user_id" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="e.g. CRI00000 or email@domain.com">
+        </label>
+        <button class="btn primary wide" onclick="login()">Login</button>
+        <div id="loginError" class="error-text"></div>
+        <div class="version">Version <?!= appVersion ?></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="appPage" class="app-page hidden">
+    <header class="topbar">
+      <div class="top-brand"><span class="brand-mark mini">MW</span><div><b>MoneyWise CFL Monitoring</b><small id="networkStatus">Online</small></div></div>
+      <div class="top-user"><div><b id="userName"></b><small id="userRole"></small></div><button class="logout-btn" title="Logout" onclick="logoutNow()">Logout</button></div>
+    </header>
+
+    <div class="app-shell">
+      <aside class="sidebar">
+        <button class="nav-btn active" data-nav="dashboard" onclick="showDashboard()"><span>⌂</span> Dashboard</button>
+        <button class="nav-btn" data-nav="cfl" onclick="newForm('CFL')"><span>✓</span> CFL Visit</button>
+        <button class="nav-btn" data-nav="session" onclick="newForm('SESSION')"><span>◉</span> Session Monitoring</button>
+        <button class="nav-btn" data-nav="followup" onclick="showFollowups()"><span>↻</span> Follow-up</button>
+        <button class="nav-btn" data-nav="submissions" onclick="showSubmissions()"><span>▤</span> My Submissions</button>
+        <button id="adminNav" class="nav-btn hidden" data-nav="admin" onclick="showAdmin()"><span>⚙</span> Admin Panel</button>
+      </aside>
+      <main id="main" class="main"></main>
+    </div>
+
+    <nav class="bottom-nav">
+      <button data-nav="dashboard" onclick="showDashboard()"><span>⌂</span><small>Dashboard</small></button>
+      <button data-nav="cfl" onclick="newForm('CFL')"><span>✓</span><small>CFL Form</small></button>
+      <button data-nav="session" onclick="newForm('SESSION')"><span>◉</span><small>Session</small></button>
+      <button data-nav="followup" onclick="showFollowups()"><span>↻</span><small>Follow-up</small></button>
+      <button data-nav="submissions" onclick="showSubmissions()"><span>▤</span><small>My Data</small></button>
+      <button id="adminBottom" class="hidden" data-nav="admin" onclick="showAdmin()"><span>⚙</span><small>Admin</small></button>
+    </nav>
+  </section>
+
+  <script>window.MW_APP_VERSION = '<?!= appVersion ?>';</script>
+  <?!= include('JS'); ?>
+</body>
+</html>

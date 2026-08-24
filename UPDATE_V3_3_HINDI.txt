@@ -1,0 +1,16 @@
+MoneyWise v3.3 QUICK UPDATE
+
+1) v3.3 की changed files अपने current project folder में Replace करें.
+2) FollowupService.gs नई file है — इसे जरूर रखें.
+3) CMD: clasp push
+4) Apps Script: setupMoneyWise() एक बार Run करें.
+5) Deploy > Manage deployments > Edit > New version > Deploy
+
+नई सुविधा:
+- Dashboard Score Trend
+- Follow-up/TAT chart
+- Multiple suggestion/action points per indicator
+- हर suggestion की अलग Timeline Date
+- Completion Date अगली visit में verify होने पर
+- TAT: 1-7 days late Amber; >7 days late Red/TAT; TAT days = delay minus 7
+- Point-wise previous Observation/Suggestion

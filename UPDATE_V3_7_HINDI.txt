@@ -1,0 +1,47 @@
+MoneyWise v3.7 Monitoring & Reminder Update
+
+1. CBO CFL ACCESS
+- CBO login ki Consultant ID / Official Email / Name Cbo Master se match hoti hai.
+- Cbo Master ka District uthta hai.
+- CFL Master me same District ke saare CFL dropdown me aate hain.
+- "Additional Cfl also" access ke liye use nahi hota.
+
+2. FIELD LAST VISIT
+- AM/CBO form ke top par "Your Last Visit" card.
+- Last CFL, District, Date, Report Type, open/overdue count.
+- Last visit ke Observation, Suggestion/Action, Timeline aur TAT point-wise.
+- "Visit this CFL again" se same CFL select kiya ja sakta hai.
+
+3. SAME CFL REVISIT FOLLOW-UP
+- CFL select karte hi us CFL ke ALL unresolved older action points carry forward honge.
+- Sirf immediately previous visit tak limited nahi.
+- Completion Date next verification visit par hi bharna hai.
+
+4. ADMIN MONITORING
+Admin Panel > Monitoring & Reminders:
+- Officer-wise visits
+- CFL/Session visit count
+- Last visit place/date
+- Total action points
+- Covered/completed points
+- Open, Amber, Red/TAT
+- Completion %
+- CFL-wise last visit and follow-up status
+
+5. EMAIL REMINDERS
+- Admin officer row se manual consolidated Email Reminder bhej sakta hai.
+- Full ADMIN daily 8 AM automatic reminders Enable/Disable kar sakta hai.
+- Ek officer ko ek consolidated email me sab overdue points milte hain.
+- Active Admin IDs ko daily summary email milti hai.
+- Reminder Log sheet me audit save hota hai.
+
+6. PDF
+- Blue PDF section headings center aligned.
+
+INSTALL
+- Patch files existing local project folder me replace/copy karein.
+- clasp push
+- Apps Script me setupMoneyWise() ek baar Run karein (Reminder Log create hoga).
+- New permission/authorization aaye to Allow karein (trigger management scope).
+- Deploy > Manage deployments > Edit > New version > Deploy.
+- Full ADMIN login > Admin > Monitoring & Reminders > Enable Daily 8 AM Reminder (optional but recommended).

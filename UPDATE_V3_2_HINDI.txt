@@ -1,0 +1,18 @@
+MoneyWise v3.2 - Update Steps
+
+Is update me:
+1) Form default English.
+2) Hindi button par Hindi-only labels/guidance.
+3) Indicators/sections compact accordion.
+4) Recipient Emails field removed.
+5) Active Admin Users ko report PDF/Excel links automatic email.
+6) PDF/Excel report template structure unchanged.
+
+UPDATE:
+- v3.2 folder ki files apne existing local MoneyWise project folder me replace karein.
+- CMD me: clasp push
+- Apps Script editor me setupMoneyWise() ek baar Run karein; nayi mail permission maange to Allow karein. Existing data delete nahi hoga.
+- Apps Script: Deploy > Manage deployments > Edit > New version > Deploy
+- Naya /exec URL same reh sakta hai if existing deployment update kiya hai.
+- Incognito/mobile me test karein.
+- Admin Users sheet me Active admin email verify karein.

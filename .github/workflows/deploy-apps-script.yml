@@ -1,0 +1,45 @@
+name: Deploy Apps Script
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '**.gs'
+      - '**.html'
+      - 'appsscript.json'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Restore clasp credentials
+        shell: bash
+        run: |
+          printf '%s' '${{ secrets.CLASPRC_JSON }}' > "$HOME/.clasprc.json"
+          printf '%s' '${{ secrets.CLASP_JSON }}' > .clasp.json
+
+      - name: Push source to Apps Script
+        run: npx --yes @google/clasp push --force
+
+      - name: Create immutable Apps Script version
+        id: version
+        shell: bash
+        run: |
+          OUT=$(npx --yes @google/clasp version "GitHub ${GITHUB_SHA::7}")
+          echo "$OUT"
+          VERSION=$(echo "$OUT" | grep -oE '[0-9]+' | tail -1)
+          test -n "$VERSION"
+          echo "number=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Redeploy existing Web App
+        if: ${{ secrets.APPS_SCRIPT_DEPLOYMENT_ID != '' }}
+        run: npx --yes @google/clasp redeploy "${{ secrets.APPS_SCRIPT_DEPLOYMENT_ID }}" "${{ steps.version.outputs.number }}" "GitHub ${GITHUB_SHA::7}"

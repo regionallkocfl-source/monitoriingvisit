@@ -1,0 +1,11 @@
+MoneyWise CFL Monitoring — v3.5 FINAL
+
+Main fixes:
+1. Excel hidden-template export bug fixed.
+2. PDF/Excel independent + retry.
+3. All form questions always open.
+4. Session Observer / Venue / Session Type one row on laptop/tablet.
+5. Blue-box PDF headings retained.
+6. Mobile rendering/draft/form-loading optimized.
+
+Deploy: replace files -> clasp push -> setupMoneyWise() once -> New Version Deploy.

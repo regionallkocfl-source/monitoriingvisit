@@ -1,0 +1,6 @@
+V3.9 FINAL
+- Admin CFL/Block: existing CFL select; all master fields auto-fetch/read-only; only Adjacent Block 1/2 editable.
+- Adjacent-block save is backend-safe and cannot overwrite BCC/Phase/Bank/District/Base Block.
+- AM/CBO CFL & Session Visit Block dropdown automatically uses Base + Adjacent 1 + Adjacent 2.
+- GitHub Actions + clasp deployment files included.
+- Android Studio mobile wrapper source included.

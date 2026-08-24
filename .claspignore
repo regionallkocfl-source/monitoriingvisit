@@ -1,0 +1,12 @@
+.github/**
+mobile-app/**
+.gitignore
+.claspignore
+.clasp.json.example
+GITHUB_DEPLOY_HINDI.md
+MOBILE_APP_BUILD_HINDI.md
+README_HINDI.md
+DEPLOY_TEST_CHECKLIST_HINDI.md
+UPDATE_*.txt
+VERSION.txt
+*.zip

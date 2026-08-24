@@ -1,0 +1,53 @@
+MoneyWise CFL Monitoring — v3.4 Update
+======================================
+
+User-requested production changes:
+
+1) PDF report
+- PDF is generated directly as a separate report; downloadable Excel is NOT converted into PDF.
+- Session PDF follows the approved 4-part visual structure: header/meta, Checklist & Scoring table, Total/Previous Follow-up, Photographs + Sign-off.
+- PDF columns: Sr | Title / Full Guidance | Score | Observation | Suggestion Recommended | Time Line Date.
+- Excel continues as a separate .xlsx output.
+
+2) Compact form
+- Removed Expand all / Collapse all.
+- Observation + Suggestion/Action Point + Timeline Date are on one compact row.
+- More action points can be added; each has its own Timeline Date.
+- Completion Date is entered during the next visit follow-up verification.
+
+3) Single report email
+- Google Drive sharing is silent (no separate Item shared with you mail for each asset).
+- One MoneyWise email is sent per submission/update to active Admin Users.
+- PDF and Excel are attached to the same email.
+
+4) Drive folders
+MoneyWise CFL Monitoring Reports/
+  Consultant ID - Consultant Name/
+    YYYY-MM-DD/
+      CFL Name/
+        Submission ID/
+          PDF, Excel, photos, signature, JSON backup
+
+5) Google Sheet photo links
+- Photo URLs are written as blue, underlined, clickable rich-text links.
+- setupMoneyWise() repairs old Photo URLs cells too when raw URLs are present.
+
+6) Mobile navigation
+- After login mobile shows fixed TOP navigation tabs:
+  Dashboard | CFL Form | Session Form | My Submissions | Admin (Admin login only)
+- Form remains mobile responsive.
+
+DEPLOY / UPDATE
+---------------
+A. Replace patch files in your existing local project folder.
+B. Run: clasp push
+C. Apps Script editor: run setupMoneyWise() once and Allow the requested permissions.
+D. Deploy > Manage deployments > Edit > New version > Deploy.
+E. Open the same /exec URL in Incognito/mobile and test one Session submission.
+
+Expected test:
+- Only one MoneyWise email, with PDF + XLSX attached.
+- No separate Drive share emails for PDF/XLSX/photo/folder.
+- Consultant ID - Name folder contains all submission assets.
+- Photo URLs in Google Sheet are blue/clickable.
+- Mobile nav tabs are visible at the top.

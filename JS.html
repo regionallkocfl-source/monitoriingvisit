@@ -1,0 +1,736 @@
+<script>
+const STATE = {
+  token: '', user: null, boot: null, cfls: [], form: null, openedAt: null,
+  clientToken: '', editingId: '', editingRequestId: '', language: 'EN',
+  photos: [], photoLocation: '', signatureDirty: false, previousFollowup: null,
+  adminMasters: null, adminOverview: null, draftTimer: null, cflsLoaded: false
+};
+
+const $ = id => document.getElementById(id);
+const esc = value => String(value == null ? '' : value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const nl2br = value => esc(value).replace(/\n/g,'<br>');
+const uid = () => (window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : 'mw-' + Date.now() + '-' + Math.random().toString(16).slice(2));
+const todayYmd = () => { const d=new Date(); const z=n=>String(n).padStart(2,'0'); return d.getFullYear()+'-'+z(d.getMonth()+1)+'-'+z(d.getDate()); };
+const bi = (en,hi) => `<span class="en-text">${esc(en)}</span><span class="hi-text">${esc(hi||en)}</span>`;
+const tr = (en,hi) => STATE.language==='HI' ? (hi||en) : en;
+
+function rpc(name, ...args) {
+  return new Promise((resolve, reject) => {
+    try {
+      google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler(err => reject(new Error((err && err.message) || String(err))))[name](...args);
+    } catch (e) { reject(e); }
+  });
+}
+
+function busy(on, text) {
+  $('loadingText').textContent = text || 'Working…';
+  $('loading').classList.toggle('hidden', !on);
+}
+
+let toastTimer;
+function toast(message, type='ok') {
+  const t=$('toast'); t.textContent=message; t.className='toast show '+type;
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.className='toast',3200);
+}
+
+function setActiveNav(key) {
+  document.querySelectorAll('[data-nav]').forEach(b => b.classList.toggle('active', b.dataset.nav===key));
+}
+
+function openModal(html) { $('modalBox').innerHTML=html; $('modal').classList.remove('hidden'); }
+function closeModal() { $('modal').classList.add('hidden'); $('modalBox').innerHTML=''; }
+function modalBackdrop(e){ if(e.target.id==='modal') closeModal(); }
+
+window.addEventListener('online', updateNetwork);
+window.addEventListener('offline', updateNetwork);
+function updateNetwork(){
+  const s=$('networkStatus'); if(!s)return;
+  s.textContent=navigator.onLine?'Online':'Offline - draft will stay on device';
+  s.style.color=navigator.onLine?'#b7f7d0':'#ffd6ae';
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+  updateNetwork();
+  // Privacy: never prefill the previous user's ID on shared/mobile field devices.
+  try{localStorage.removeItem('mw_login_id');}catch(e){}
+  $('loginId').value='';
+  $('loginId').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
+  const saved=sessionStorage.getItem('mw_token');
+  if(saved){
+    STATE.token=saved;
+    try{
+      busy(true,'Restoring session…');
+      const boot=await rpc('getBootstrap',STATE.token);
+      enterApp(boot);
+    }catch(e){sessionStorage.removeItem('mw_token');STATE.token='';}
+    finally{busy(false);}
+  }
+});
+
+async function login(){
+  const id=$('loginId').value.trim();
+  $('loginError').textContent='';
+  if(!id){$('loginError').textContent='Consultant ID / Email required.';return;}
+  busy(true,'Signing in…');
+  try{
+    // loginUser now returns everything needed for the first screen. Avoid a second
+    // bootstrap round-trip and never calculate the heavy dashboard during AM/CBO login.
+    const r=await rpc('loginUser',id);
+    STATE.token=r.token; sessionStorage.setItem('mw_token',STATE.token);
+    try{localStorage.removeItem('mw_login_id');}catch(e){}
+    enterApp({version:r.version||window.MW_APP_VERSION,user:r.user,cfls:[],config:r.config||{maxPhotos:8,editWindowHours:24,languageDefault:'EN'},deferCfls:true});
+  }catch(e){$('loginError').textContent=e.message;}
+  finally{busy(false);}
+}
+
+function enterApp(boot){
+  STATE.boot=boot||{}; STATE.user=STATE.boot.user; STATE.cfls=STATE.boot.cfls||[]; STATE.cflsLoaded=!!(STATE.boot.cfls && !STATE.boot.deferCfls);
+  $('loginPage').classList.add('hidden'); $('appPage').classList.remove('hidden');
+  $('userName').textContent=STATE.user.name||STATE.user.id;
+  $('userRole').textContent=STATE.user.role+(STATE.user.permission?' • '+STATE.user.permission:'');
+  const isAdmin=STATE.user.role==='ADMIN'; $('adminNav').classList.toggle('hidden',!isAdmin); $('adminBottom').classList.toggle('hidden',!isAdmin);
+  updateNetwork();
+  if(isAdmin){
+    // Admin keeps the analytical dashboard as the landing page.
+    showDashboard();
+  }else{
+    // Field users go straight to CFL data entry. Session entry remains one tap away
+    // in the top/mobile navigation. This deliberately skips dashboard queries.
+    setTimeout(()=>newForm('CFL'),0);
+  }
+}
+
+async function logoutNow(){
+  try{ if(STATE.token) await rpc('logout',STATE.token); }catch(e){}
+  sessionStorage.removeItem('mw_token');
+  Object.assign(STATE,{token:'',user:null,boot:null,cfls:[],cflsLoaded:false,form:null,editingId:'',photos:[]});
+  $('appPage').classList.add('hidden'); $('loginPage').classList.remove('hidden');
+  try{localStorage.removeItem('mw_login_id');}catch(e){}
+  $('loginId').value=''; $('loginError').textContent='';
+  setTimeout(()=>{try{$('loginId').focus();}catch(e){}},0);
+}
+
+async function showDashboard(prefetched){
+  setActiveNav('dashboard');
+  let d=prefetched;
+  if(!d){busy(true,'Loading dashboard…');try{d=await rpc('getDashboard',STATE.token);}catch(e){toast(e.message,'err');return;}finally{busy(false);}}
+  const c=d.counts||{};
+  $('main').innerHTML=`
+    <div class="page-head"><div><h1>Dashboard</h1><p class="muted">Welcome, ${esc(STATE.user.name||'')}</p></div><div class="actions"><button class="btn primary" onclick="newForm('CFL')">+ CFL Visit</button><button class="btn secondary" onclick="newForm('SESSION')">+ Session</button></div></div>
+    <div class="grid kpis">
+      ${kpi(c.total||0,'Total submissions')}${kpi(c.today||0,'Today')}${kpi(c.month||0,'This month')}${kpi((d.averageScore||0)+'%','Average score')}${kpi(c.openActions||0,'Open follow-ups')}${STATE.user.role==='ADMIN'?kpi(c.pendingEdits||0,'Pending edits'):kpi((c.cfl||0)+' / '+(c.session||0),'CFL / Session')}
+    </div>
+    <div class="dashboard-charts">
+      <div class="card chart-card"><div class="chart-head"><div><h3>Score Trend</h3><div class="muted small">Last ${Math.min(12,(d.scoreTrend||[]).length)} visits</div></div></div>${scoreTrendHtml(d.scoreTrend||[])}</div>
+      <div class="card chart-card"><div class="chart-head"><div><h3>Follow-up / TAT</h3><div class="muted small">7-day grace after Timeline Date</div></div></div>${tatChartHtml(d.tatSummary||{})}</div>
+    </div>
+    ${dueActionsHtml(d.dueActions||[])}
+    <h2 class="section-title">Recent submissions</h2>
+    <div class="report-list">${(d.recent||[]).length?(d.recent||[]).map(reportCardHtml).join(''):'<div class="card empty">No submissions yet.</div>'}</div>`;
+}
+function kpi(n,label){return `<div class="card kpi-card"><div class="kpi-number">${esc(n)}</div><div class="kpi-label">${esc(label)}</div></div>`}
+function scoreTrendHtml(rows){
+  if(!rows.length)return '<div class="empty-chart">No score trend yet.</div>';
+  const w=640,h=220,pad=34, vals=rows.map(x=>Math.max(0,Math.min(100,Number(x.score)||0))), n=rows.length;
+  const x=i=>pad+(n===1?(w-2*pad)/2:i*(w-2*pad)/(n-1)), y=v=>h-pad-(v/100)*(h-2*pad);
+  const pts=vals.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const grid=[0,25,50,75,100].map(v=>`<line x1="${pad}" y1="${y(v)}" x2="${w-pad}" y2="${y(v)}" class="chart-grid"/><text x="4" y="${y(v)+4}" class="chart-axis">${v}%</text>`).join('');
+  const dots=rows.map((r,i)=>`<circle cx="${x(i)}" cy="${y(vals[i])}" r="5" class="trend-dot"><title>${esc(r.date)} · ${esc(r.cfl)} · ${vals[i]}%</title></circle>`).join('');
+  const labels=rows.map((r,i)=>i===0||i===rows.length-1||rows.length<=6||i%2===0?`<text x="${x(i)}" y="${h-8}" text-anchor="middle" class="chart-axis">${esc((r.date||'').slice(5))}</text>`:'').join('');
+  return `<div class="chart-scroll"><svg class="trend-svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="Score trend">${grid}<polyline points="${pts}" class="trend-line"/>${dots}${labels}</svg></div>`;
+}
+function tatChartHtml(t){
+  const rows=[['Green',Number(t.green||0),'tat-green'],['Amber',Number(t.amber||0),'tat-amber'],['Red / TAT',Number(t.red||0),'tat-red'],['Pending',Number(t.pending||0)+Number(t.noTimeline||0),'tat-pending']];
+  const max=Math.max(1,...rows.map(x=>x[1]));
+  return `<div class="tat-bars">${rows.map(x=>`<div class="tat-bar-row"><span>${x[0]}</span><div class="tat-track"><div class="tat-fill ${x[2]}" style="width:${Math.round(x[1]/max*100)}%"></div></div><b>${x[1]}</b></div>`).join('')}</div><div class="tat-rule small muted">Green = on/before timeline · Amber = 1–7 days late · Red = more than 7 days late</div>`;
+}
+function dueActionsHtml(rows){
+  if(!rows.length)return '';
+  return `<div class="card due-card"><div class="chart-head"><div><h3>Follow-ups needing attention</h3><div class="muted small">Open points that crossed Timeline Date</div></div></div><div class="due-list">${rows.map((x,i)=>`<div class="due-item"><div class="due-num">${i+1}</div><div><b>${esc(x.cfl||'')} · I${esc(x.indicator||'')}</b><div>${esc(x.suggestion||'')}</div><div class="small muted">Timeline ${esc(x.timelineDate||'–')} · ${esc(x.tatLabel||x.tatStatus||'')}</div></div></div>`).join('')}</div></div>`;
+}
+function reportCardHtml(r){
+  const grade=esc(r.grade||''); return `<div class="card report-card"><div><div class="id">${esc(r.id)}</div><div>${esc(r.cfl||'')} • ${esc(r.district||'')}</div><div class="meta">${esc(r.type)} • ${esc(r.visitDate||r.timestamp||'')} • ${esc(r.officer||'')}</div></div><div class="muted">${esc(r.type==='CFL'?'CFL Visit':'Session Monitoring')}</div><div class="score-badge grade-${grade}">${esc(r.score||'–')}% ${grade}</div><div class="actions"><button class="btn outline" onclick="viewSubmission('${esc(r.id)}','${esc(r.type)}')">View</button>${r.pdf?`<a class="btn secondary" target="_blank" rel="noopener" href="${esc(r.pdf)}">PDF</a>`:''}${r.excel?`<a class="btn secondary" target="_blank" rel="noopener" href="${esc(r.excel)}">Excel</a>`:''}</div></div>`;
+}
+
+async function loadFieldVisitSummary(){
+  const box=$('fieldVisitSummary'); if(!box)return;
+  try{const d=await rpc('getFieldVisitSummary',STATE.token);box.innerHTML=fieldVisitSummaryHtml(d);}catch(e){box.innerHTML=`<div class="muted small">${esc(e.message)}</div>`;}
+}
+function fieldVisitSummaryHtml(d){
+  if(!d||!d.exists)return `<div class="field-summary-head"><div><b>${bi('Last Visit & Follow-up','पिछली विज़िट और फॉलो-अप')}</b><div class="muted small">${bi('No previous visit found for this login.','इस लॉगिन के लिए कोई पिछली विज़िट नहीं मिली।')}</div></div></div>`;
+  const v=d.lastVisit||{}, pts=(d.points||[]).slice(0,8);
+  return `<div class="field-summary-head"><div><b>${bi('Your Last Visit','आपकी पिछली विज़िट')}</b><div class="field-last-place">${esc(v.cfl||'–')} <span class="muted">• ${esc(v.district||'')} • ${esc(v.visitDate||'–')} • ${esc(v.type||'')}</span></div></div><div class="field-summary-kpis"><span class="mini-kpi">${bi('Open','लंबित')} <b>${esc(d.openTotal||0)}</b></span><span class="mini-kpi danger-lite">${bi('Overdue','समय पार')} <b>${esc(d.overdueTotal||0)}</b></span>${v.cfl?`<button class="btn outline compact-btn" onclick="selectLastVisitCfl('${esc(v.cfl)}')">${bi('Visit this CFL again','इस CFL पर फिर विज़िट')}</button>`:''}</div></div>
+    ${pts.length?`<div class="last-points-title">${bi('Observation / action points from last visit','पिछली विज़िट के अवलोकन / कार्य बिंदु')}</div><div class="last-points">${pts.map((x,i)=>`<div class="last-point"><span class="point-pill">${i+1}</span><div><b>I${esc(x.indicatorSr||'')} · ${esc(x.indicatorTitle||'')}</b><div><span class="muted small">${bi('Observation','अवलोकन')}:</span> ${esc(x.observation||'–')}</div>${x.suggestion?`<div><span class="muted small">${bi('Action','कार्य')}:</span> ${esc(x.suggestion)}</div>`:''}<div class="small"><b>${bi('Timeline','समय सीमा')}:</b> ${esc(x.timelineDate||'–')} ${x.completionDate?`· <b>${bi('Completed','पूर्ण')}:</b> ${esc(x.completionDate)}`:`· <span class="tat-pill tat-${String(x.tatStatus||'pending').toLowerCase()}">${esc(x.tatLabel||'Pending')}</span>`}</div></div></div>`).join('')}</div>`:`<div class="muted small">${bi('No observation/action point was recorded in the last visit.','पिछली विज़िट में कोई अवलोकन/कार्य बिंदु दर्ज नहीं था।')}</div>`}`;
+}
+function selectLastVisitCfl(cfl){
+  const sel=$('meta_cflName'); if(!sel)return;
+  const exists=[...sel.options].some(o=>o.value===cfl); if(!exists){toast('This CFL is not in your current mapped access.','err');return;}
+  sel.value=cfl; syncCflSearchDisplay(cfl); onCflChange(cfl); ($('cflSearchInput')||sel).scrollIntoView({behavior:'smooth',block:'center'});
+}
+
+async function newForm(type,prefill=null){
+  setActiveNav(type==='CFL'?'cfl':'session');
+  busy(true,type==='CFL'?'Opening CFL data entry…':'Opening Session data entry…');
+  try{
+    // Form definition and CFL access list are independent, so load them in parallel.
+    // The CFL list is fetched only once per login session.
+    const jobs=[rpc('getFormDefinition',STATE.token,type)];
+    if(!STATE.cflsLoaded) jobs.push(rpc('getCflOptions',STATE.token));
+    const out=await Promise.all(jobs);
+    STATE.form=out[0];
+    if(!STATE.cflsLoaded){STATE.cfls=out[1]||[];STATE.cflsLoaded=true;}
+    STATE.openedAt=new Date(); STATE.clientToken=uid(); STATE.photos=[]; STATE.photoLocation=''; STATE.signatureDirty=false; STATE.previousFollowup=null;
+    STATE.editingId=prefill&&prefill.__id?prefill.__id:''; STATE.editingRequestId=prefill&&prefill.__requestId?prefill.__requestId:'';
+    renderForm(prefill);
+  }catch(e){toast(e.message,'err');}
+  finally{busy(false);}
+}
+
+function renderForm(prefill){
+  const f=STATE.form;
+  STATE.language='EN';
+  $('main').className='main lang-en-only';
+  $('main').innerHTML=`
+    <div class="page-head"><div><h1>${bi(f.title,f.titleHi||f.title)}</h1><p class="muted">${STATE.editingId?`${bi('Editing report','रिपोर्ट संपादन')}: ${esc(STATE.editingId)}`:bi('Field monitoring entry','फील्ड मॉनिटरिंग एंट्री')}</p></div></div>
+    <div class="form-toolbar">
+      <div class="progress-row">
+        <span id="progressText">0 / ${f.indicators.length} indicators scored</span>
+        <div class="toolbar-actions">
+          <div class="lang-toggle"><button id="langEn" class="active" onclick="setLanguage('EN')">English</button><button id="langHi" onclick="setLanguage('HI')">हिन्दी</button></div>
+        </div>
+      </div>
+      <div class="progress-wrap"><div id="progressBar" class="progress-bar"></div></div>
+    </div>
+
+    ${STATE.user.role!=='ADMIN'?`<section id="fieldVisitSummary" class="card field-visit-summary"><div class="muted">${bi('Loading your last visit & pending follow-up…','आपकी पिछली विज़िट और लंबित फॉलो-अप लोड हो रहे हैं…')}</div></section>`:''}
+
+    <section class="card form-section static-form-section">
+      <div class="static-section-title">${bi('Visit details','विज़िट विवरण')}</div>
+      <div class="static-section-body"><div class="fields ${f.type==='SESSION'?'session-meta-grid':''}">${f.meta.map(metaFieldHtml).join('')}</div></div>
+    </section>
+
+    <section id="followupSection" class="card form-section static-form-section">
+      <div class="static-section-title">${bi('Previous Visit Follow-up','पिछली विज़िट फॉलो-अप')}</div>
+      <div class="static-section-body"><div id="followupBody" class="muted">${bi('Select CFL to load previous observation.','पिछला अवलोकन देखने के लिए CFL चुनें।')}</div></div>
+    </section>
+
+    <section class="form-section">
+      <div class="indicator-section-head"><h2 class="section-title">${bi('Indicators','संकेतक')}</h2><span class="muted small">${bi('All questions are shown below.','सभी प्रश्न नीचे खुले हुए हैं।')}</span></div>
+      ${f.indicators.map(indicatorHtml).join('')}
+    </section>
+
+    <section class="card form-section static-form-section">
+      <div class="static-section-title">${bi('Photos & GPS','फोटो और GPS')}</div>
+      <div class="static-section-body">${photoSectionHtml()}</div>
+    </section>
+
+    <section class="card form-section static-form-section">
+      <div class="static-section-title">${bi('Sign-off','हस्ताक्षर')}</div>
+      <div class="static-section-body">${signoffSectionHtml()}</div>
+    </section>
+
+    <div class="sticky-submit"><div><b>${STATE.editingId?bi('Update existing report','मौजूदा रिपोर्ट अपडेट करें'):bi('Submit monitoring report','मॉनिटरिंग रिपोर्ट जमा करें')}</b><div id="draftState" class="draft-state">${bi('Draft auto-save enabled','ड्राफ्ट ऑटो-सेव चालू है')}</div></div><div class="actions"><button class="btn outline" onclick="saveDraftNow()">${bi('Save Draft','ड्राफ्ट सेव करें')}</button><button id="submitBtn" class="btn primary" onclick="submitCurrent()">${STATE.editingId?bi('Update & Generate','अपडेट और जनरेट करें'):bi('Submit & Generate PDF/Excel','सबमिट और PDF/Excel बनाएं')}</button></div></div>`;
+
+  bindFormEvents();
+  if(prefill) applyPrefill(prefill); else restoreDraftIfAny();
+  if(!$('meta_visitDate').value) $('meta_visitDate').value=todayYmd();
+  if(!$('meta_officerName').value) $('meta_officerName').value=f.userDefaults.officerName||STATE.user.name||'';
+  if(!$('meta_officerDesignation').value) $('meta_officerDesignation').value=f.userDefaults.officerDesignation||STATE.user.designation||'';
+  $('signName').value=prefill&&prefill.signoffName||f.userDefaults.signoffName||STATE.user.name||'';
+  $('signDesignation').value=prefill&&prefill.signoffDesignation||f.userDefaults.signoffDesignation||STATE.user.designation||'';
+  initSignaturePad(); updateProgress(); scheduleDraft();
+  if(STATE.user.role!=='ADMIN') setTimeout(loadFieldVisitSummary,0);
+}
+
+function metaFieldHtml(field){
+  const ro=field.readOnly || (field.userLocked && STATE.user.role!=='ADMIN');
+  const label=`${bi(field.label+(field.required?' *':''),(field.labelHi||field.label)+(field.required?' *':''))}`;
+  const cls=[field.uiClass||'', field.key==='venue'?'session-venue':''].filter(Boolean).join(' ');
+  const wrap=(html,extra='')=>`<label class="${cls} ${extra}">${label}${html}</label>`;
+  if(field.key==='cflName') return wrap(`<div class="cfl-search-control"><input id="cflSearchInput" class="cfl-search-input" type="search" autocomplete="off" inputmode="search" placeholder="${esc(tr('Search CFL name or BCC code','CFL नाम या BCC कोड खोजें'))}" data-placeholder-en="Search CFL name or BCC code" data-placeholder-hi="CFL नाम या BCC कोड खोजें" onfocus="filterCflSearch(this.value,true)" oninput="filterCflSearch(this.value,true)" onblur="setTimeout(closeCflSearch,180)"><span class="cfl-search-icon">⌕</span><div id="cflSearchResults" class="cfl-search-results hidden"></div><select id="meta_${field.key}" class="hidden-native-cfl" tabindex="-1" aria-hidden="true" onchange="onCflChange(this.value)"><option value="">Select CFL</option>${STATE.cfls.map(c=>`<option value="${esc(c.cflName)}">${esc(c.cflName)} — ${esc(c.bccCode||'')} — ${esc(c.district||'')}</option>`).join('')}</select></div>`);
+  if(field.key==='adjacentBlock') return wrap(`<select id="meta_${field.key}"><option value="" data-en="Select block" data-hi="ब्लॉक चुनें">Select block</option></select>`);
+  if(field.type==='select') return wrap(`<select id="meta_${field.key}"><option value="" data-en="Select" data-hi="चुनें">Select</option>${(field.options||[]).map(x=>`<option>${esc(x)}</option>`).join('')}</select>`);
+  if(field.type==='textarea') return wrap(`<textarea id="meta_${field.key}" ${ro?'readonly':''}></textarea>`,'field-span-2');
+  return wrap(`<input id="meta_${field.key}" type="${field.type==='date'?'date':'text'}" ${ro?'readonly':''}>`);
+}
+
+
+function normalizeCflSearch(v){return String(v||'').toLowerCase().replace(/\s+/g,' ').trim();}
+function filterCflSearch(query,openList){
+  const box=$('cflSearchResults'); if(!box)return;
+  const q=normalizeCflSearch(query);
+  const all=(STATE.cfls||[]).slice().sort((a,b)=>String(a.cflName||'').localeCompare(String(b.cflName||'')));
+  const matches=all.filter(c=>{
+    const hay=[c.cflName,c.bccCode,c.district,c.baseBlock].map(normalizeCflSearch).join(' | ');
+    return !q || hay.includes(q);
+  });
+  const shown=matches.slice(0,20);
+  box.innerHTML=shown.length?shown.map(c=>`<button type="button" class="cfl-search-item" onmousedown="event.preventDefault()" onclick="selectCflFromSearch('${escJs(c.cflName)}')"><span class="cfl-search-name">${esc(c.cflName||'')}</span><span class="cfl-search-meta"><b>BCC ${esc(c.bccCode||'–')}</b> · ${esc(c.district||'')}</span></button>`).join(''):`<div class="cfl-search-empty">${bi('No matching CFL found.','कोई मिलान वाला CFL नहीं मिला।')}</div>`;
+  if(matches.length>shown.length)box.insertAdjacentHTML('beforeend',`<div class="cfl-search-more">${bi(`Showing first ${shown.length} of ${matches.length}. Type more to narrow the list.`,`${matches.length} में से पहले ${shown.length} दिख रहे हैं। सूची छोटी करने के लिए और लिखें।`)}</div>`);
+  if(openList!==false)box.classList.remove('hidden');
+}
+function closeCflSearch(){const box=$('cflSearchResults');if(box)box.classList.add('hidden');}
+function cflDisplayText(c){return c?`${c.cflName||''}${c.bccCode?` — BCC ${c.bccCode}`:''}`:'';}
+function syncCflSearchDisplay(name){
+  const inp=$('cflSearchInput'); if(!inp)return;
+  const c=(STATE.cfls||[]).find(x=>x.cflName===name); inp.value=cflDisplayText(c)||name||'';
+}
+function selectCflFromSearch(name){
+  const sel=$('meta_cflName'); if(!sel)return;
+  const c=(STATE.cfls||[]).find(x=>x.cflName===name); if(!c){toast('CFL not found in your mapped access.','err');return;}
+  sel.value=name; syncCflSearchDisplay(name); closeCflSearch(); onCflChange(name);
+}
+function escJs(v){return String(v==null?'':v).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\r?\n/g,' ');}
+
+function indicatorHtml(d,i){
+  const opts=d.scoreOptions||[];
+  const extra=(d.extraFields||[]).map(x=>`<label>${bi(x.label,x.labelHi||x.label)}<textarea id="extra_${i}_${esc(x.key)}"></textarea></label>`).join('');
+  return `<article class="card indicator indicator-open" id="indicator_${i}">
+    <div class="indicator-head"><span class="indicator-no">${esc(d.sr)}</span><div class="indicator-title"><span class="en-text">${esc(d.titleEn)}</span><span class="hi-text">${esc(d.titleHi||d.titleEn)}</span></div><span id="scoreStatus_${i}" class="score-status">${bi('Not scored','अंक बाकी')}</span></div>
+    <div class="indicator-body">
+      <div class="sub-blocks"><div class="sub-box en-block"><b>Guidance</b>${d.subEn&&d.subEn.length?`<ul>${d.subEn.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:`<div class="muted small">${esc(d.fullEn||d.titleEn)}</div>`}</div><div class="sub-box hi-block"><b>मार्गदर्शन</b>${d.subHi&&d.subHi.length?`<ul>${d.subHi.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:`<div class="muted small">${esc(d.fullHi||d.titleHi||d.titleEn)}</div>`}</div></div>
+      <div class="score-row"><span>${bi(`Score (Max ${d.maxScore})`,`अंक (अधिकतम ${d.maxScore})`)}</span><div class="score-options ${opts.length===4?'four':''}">${opts.map(v=>`<button type="button" class="score-chip ${Number(v)===Number(d.maxScore)?'max':''}" data-score="${v}" onclick="setScore(${i},'${v}',this)">${v}</button>`).join('')}</div><input id="score_${i}" type="hidden" value=""><button type="button" class="mini-action add-action-inline" onclick="addSuggestionPoint(${i})">+ ${bi('Action','कार्य')}</button></div>
+      <div id="quality_${i}" class="warn-text"></div>
+      <div id="suggestions_${i}" class="suggestion-points compact-answer-points">${suggestionPointHtml(i,0,'','',false,true)}</div>
+      ${extra?`<div class="answer-extra">${extra}</div>`:''}
+    </div>
+  </article>`;
+}
+
+function suggestionPointHtml(i,j,text,date,removable=true,includeObservation=false){
+  const obs=includeObservation?`<label class="compact-observation">${bi('Observation','अवलोकन')}<textarea id="obs_${i}" oninput="indicatorQuality(${i})"></textarea></label>`:`<div class="observation-spacer" aria-hidden="true"></div>`;
+  return `<div class="suggestion-point compact-answer-row" data-sug-index="${j}">${obs}<label class="compact-suggestion">${bi(j?`Suggestion / Action ${j+1}`:'Suggestion / Action Point',j?`सुझाव / कार्य ${j+1}`:'सुझाव / कार्य बिंदु')}<textarea id="sug_${i}_${j}" oninput="indicatorQuality(${i})">${esc(text||'')}</textarea></label><label class="timeline-field">${bi('Timeline Date','समय सीमा तारीख')}<input id="time_${i}_${j}" type="date" value="${esc(date||'')}" onchange="indicatorQuality(${i})"></label>${removable?`<button class="remove-point" type="button" title="Remove" onclick="removeSuggestionPoint(${i},${j})">×</button>`:'<span class="remove-placeholder"></span>'}</div>`;
+}
+function addSuggestionPoint(i,prefill){
+  const box=$('suggestions_'+i); if(!box)return;
+  const ids=Array.from(box.querySelectorAll('.suggestion-point')).map(x=>Number(x.dataset.sugIndex)||0); const j=ids.length?Math.max(...ids)+1:0;
+  box.insertAdjacentHTML('beforeend',suggestionPointHtml(i,j,prefill&&prefill.suggestion,prefill&&prefill.timelineDate,true,false)); scheduleDraft();
+}
+function removeSuggestionPoint(i,j){const el=document.querySelector(`#suggestions_${i} .suggestion-point[data-sug-index="${j}"]`);if(el)el.remove();indicatorQuality(i);scheduleDraft();}
+function getSuggestionPoints(i){
+  const box=$('suggestions_'+i); if(!box)return [];
+  return Array.from(box.querySelectorAll('.suggestion-point')).map(x=>{const j=Number(x.dataset.sugIndex)||0;return {suggestion:($('sug_'+i+'_'+j)||{}).value||'',timelineDate:($('time_'+i+'_'+j)||{}).value||''};}).filter(x=>x.suggestion.trim()||x.timelineDate);
+}
+
+function photoSectionHtml(){return `<p class="muted">${bi(`Use camera or gallery. Maximum ${STATE.boot.config.maxPhotos} photos.`,`कैमरा या गैलरी से अधिकतम ${STATE.boot.config.maxPhotos} फोटो जोड़ें।`)}</p><div class="actions"><label class="btn secondary" style="margin:0">📷 ${bi('Add Photos','फोटो जोड़ें')}<input id="photoInput" class="hidden" type="file" accept="image/*" capture="environment" multiple onchange="handlePhotoInput(event)"></label><button type="button" class="btn outline" onclick="capturePhotoLocation()">⌖ ${bi('Capture GPS','GPS लें')}</button></div><div id="photoStatus" class="hint">${bi('No photo uploaded.','कोई फोटो अपलोड नहीं है।')}</div><div id="photoGrid" class="photo-grid"></div>`}
+
+function signoffSectionHtml(){return `<div class="fields"><label>${bi('Name','नाम')}<input id="signName"></label><label>${bi('Designation','पद')}<input id="signDesignation"></label><label>${bi('District','जिला')}<input id="signDistrict"></label><label>${bi('Zone','ज़ोन')}<input id="signZone"></label></div><label>${bi('Digital Signature','डिजिटल हस्ताक्षर')}</label><div class="signature-wrap"><canvas id="signatureCanvas"></canvas></div><div class="signature-actions"><span class="muted small">${bi('Sign with finger or mouse. On edit, leave blank to preserve old signature.','उंगली या माउस से हस्ताक्षर करें। संपादन में खाली छोड़ने पर पुराना हस्ताक्षर सुरक्षित रहेगा।')}</span><button type="button" class="btn outline" onclick="clearSignature()">${bi('Clear','साफ करें')}</button></div>`}
+
+function bindFormEvents(){
+  $('main').addEventListener('input',e=>{if(e.target.matches('input,textarea,select'))scheduleDraft();});
+  $('main').addEventListener('change',e=>{if(e.target.matches('input,textarea,select'))scheduleDraft();if(e.target.id==='meta_visitDate'){((STATE.previousFollowup&&STATE.previousFollowup.items)||[]).forEach((_,i)=>updateFollowupTatPreview(i));}});
+}
+
+function setLanguage(lang){
+  STATE.language=lang==='HI'?'HI':'EN';
+  const m=$('main'); m.classList.remove('lang-en-only','lang-hi-only','lang-both'); m.classList.add(STATE.language==='HI'?'lang-hi-only':'lang-en-only');
+  ['langEn','langHi'].forEach(id=>$(id)&&$(id).classList.remove('active'));
+  $(STATE.language==='HI'?'langHi':'langEn').classList.add('active');
+  document.querySelectorAll('#main option[data-en]').forEach(o=>{o.textContent=STATE.language==='HI'?(o.dataset.hi||o.dataset.en):o.dataset.en;});
+  document.querySelectorAll('#main [data-placeholder-en]').forEach(el=>{el.placeholder=STATE.language==='HI'?(el.dataset.placeholderHi||el.dataset.placeholderEn):el.dataset.placeholderEn;});
+  updateProgress();
+  STATE.form && STATE.form.indicators.forEach((_,i)=>indicatorQuality(i));
+}
+
+async function onCflChange(name){
+  const c=STATE.cfls.find(x=>x.cflName===name); if(!c)return;
+  syncCflSearchDisplay(name);
+  const map={district:c.district,state:c.state,bccCode:c.bccCode,bankName:c.bankName,phase:c.phase,baseBlock:c.baseBlock};
+  Object.entries(map).forEach(([k,v])=>{const el=$('meta_'+k);if(el)el.value=v||'';});
+  setAdjacentOptions(c,$('meta_adjacentBlock').value);
+  if(!$('signDistrict').value)$('signDistrict').value=c.district||'';
+  await loadPreviousFollowup(name);
+  scheduleDraft();
+}
+
+function setAdjacentOptions(c,selected){
+  const el=$('meta_adjacentBlock'); if(!el)return;
+  const opts=[c.baseBlock].concat(c.adjacentBlocks||[]).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i);
+  el.innerHTML='<option value="" data-en="Select block" data-hi="ब्लॉक चुनें">'+tr('Select block','ब्लॉक चुनें')+'</option>'+opts.map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('');
+  if(selected&&opts.includes(selected))el.value=selected; else if(opts.length===1)el.value=opts[0];
+}
+
+async function loadPreviousFollowup(cfl){
+  $('followupBody').innerHTML='<span class="muted">Loading previous visit…</span>';
+  try{
+    const f=await rpc('getPreviousFollowup',STATE.token,STATE.form.type,cfl,STATE.editingId||''); STATE.previousFollowup=f;
+    $('followupBody').innerHTML=followupHtml(f);
+  }catch(e){$('followupBody').innerHTML='<span class="error-text">'+esc(e.message)+'</span>';}
+}
+function followupHtml(f){
+  const items=f.items||[];
+  const itemsHtml=items.length?`<div class="followup-items">${items.map((x,i)=>followupItemHtml(x,i)).join('')}</div>`:`<div class="card empty">${bi('No previous action points.','पिछले कोई कार्य बिंदु नहीं हैं।')}</div>`;
+  return `<div><div class="followup-prev compact-prev"><b>${bi('Previous report','पिछली रिपोर्ट')}:</b> ${esc(f.previousSubmissionId||tr('No previous report','कोई पिछली रिपोर्ट नहीं'))} · <b>${bi('Date','तारीख')}:</b> ${esc(f.visitDate||'–')}${f.pdf?` <a target="_blank" href="${esc(f.pdf)}">PDF</a>${f.excel?` · <a target="_blank" href="${esc(f.excel)}">Excel</a>`:''}`:''}</div>
+    <div class="followup-rule">${bi('Enter Completion Date only when you verify the previous action point during this visit.','इस विज़िट में पिछले कार्य बिंदु की पुष्टि होने पर ही पूर्णता तारीख भरें।')} <b>${bi('TAT rule:','TAT नियम:')}</b> ${bi('1–7 days late = Amber grace; more than 7 days late = Red/TAT.','1–7 दिन देरी = Amber grace; 7 दिन से अधिक = Red/TAT.')}</div>
+    ${itemsHtml}
+    <label class="followup-note">${bi('Overall Follow-up Note / Action Taken (optional)','समग्र फॉलो-अप नोट / की गई कार्रवाई (वैकल्पिक)')}<textarea id="followupAction"></textarea></label>
+  </div>`;
+}
+function followupItemHtml(x,i){
+  return `<div class="followup-item"><div class="followup-item-top"><span class="point-pill">${i+1}</span><b>I${esc(x.indicatorSr||'')} · ${esc(x.indicatorTitle||'')}</b>${x.sourceVisitDate?`<span class="muted small">Source visit ${esc(x.sourceVisitDate)}</span>`:''}<span id="fu_tat_${i}" class="tat-pill tat-${String(x.tatStatus||'pending').toLowerCase()}">${esc(x.tatLabel||'Pending')}</span></div><div class="followup-pair"><div><span class="small muted">${bi('Previous Observation','पिछला अवलोकन')}</span><div>${nl2br(x.observation||'–')}</div></div><div><span class="small muted">${bi('Previous Suggestion','पिछला सुझाव')}</span><div>${nl2br(x.suggestion||'–')}</div></div></div><div class="followup-dates"><div><span class="small muted">${bi('Timeline Date','समय सीमा')}</span><b>${esc(x.timelineDate||'–')}</b></div><label>${bi('Completion Date','पूर्णता तारीख')}<input id="fu_date_${i}" type="date" value="${esc(x.completionDate||'')}" onchange="updateFollowupTatPreview(${i})"></label><div><span class="small muted">TAT</span><b id="fu_days_${i}">${x.tatDays?esc(x.tatDays)+' day(s)':'–'}</b></div></div></div>`;
+}
+function updateFollowupTatPreview(i){
+  const x=(STATE.previousFollowup&&STATE.previousFollowup.items||[])[i]; if(!x)return;
+  const completion=($('fu_date_'+i)||{}).value||'', asOf=($('meta_visitDate')||{}).value||todayYmd();
+  const t=new Date((x.timelineDate||'')+'T12:00:00'), e=new Date((completion||asOf)+'T12:00:00'); if(isNaN(t)||isNaN(e))return;
+  const delay=Math.round((e-t)/86400000); let status,label,tat=0;
+  if(completion&&delay<=0){status='green';label=tr('Green · On time','Green · समय पर');}
+  else if(!completion&&delay<=0){status='pending';label=tr('Pending · Within timeline','Pending · समय सीमा के भीतर');}
+  else if(delay<=7){status='amber';label=tr(`Amber · ${delay} day(s) late`,`Amber · ${delay} दिन देरी`);}
+  else{status='red';tat=delay-7;label=tr(`Red · TAT ${tat} day(s)`,`Red · TAT ${tat} दिन`);}
+  const pill=$('fu_tat_'+i);if(pill){pill.className='tat-pill tat-'+status;pill.textContent=label;} const d=$('fu_days_'+i);if(d)d.textContent=tat?tat+' day(s)':'–'; scheduleDraft();
+}
+
+function openNextIncomplete(){
+  if(!STATE.form)return;
+  let idx=STATE.form.indicators.findIndex((_,i)=>!$('score_'+i)||$('score_'+i).value==='');
+  if(idx<0){toast(tr('All indicators are scored.','सभी संकेतकों के अंक भर गए हैं।'));return;}
+  const el=$('indicator_'+idx); if(el) el.scrollIntoView({behavior:'smooth',block:'center'});
+}
+
+function setScore(i,val,btn){
+  $('score_'+i).value=val; btn.parentElement.querySelectorAll('.score-chip').forEach(b=>b.classList.toggle('active',b===btn));
+  const status=$('scoreStatus_'+i); if(status){status.textContent=tr('Score '+val,'अंक '+val);status.classList.add('done');}
+  indicatorQuality(i); updateProgress(); scheduleDraft();
+}
+function indicatorQuality(i){
+  const d=STATE.form.indicators[i], v=$('score_'+i).value, obs=$('obs_'+i).value.trim(), sugs=getSuggestionPoints(i); let msg='';
+  if(v!==''&&Number(v)<Number(d.maxScore)&&!obs)msg=tr('Low score — please add an observation.','कम अंक — कृपया अवलोकन लिखें।');
+  else if(sugs.some(x=>x.suggestion.trim()&&!x.timelineDate))msg=tr('Each suggestion needs its own Timeline Date.','हर सुझाव के लिए अलग समय सीमा तारीख आवश्यक है।');
+  $('quality_'+i).textContent=msg;
+}
+function updateProgress(){
+  if(!STATE.form)return; const total=STATE.form.indicators.length; let done=0;
+  STATE.form.indicators.forEach((_,i)=>{
+    const v=$('score_'+i)&&$('score_'+i).value;
+    if(v!==''){done++; const s=$('scoreStatus_'+i); if(s){s.textContent=tr('Score '+v,'अंक '+v);s.classList.add('done');}}
+  });
+  $('progressText').textContent=STATE.language==='HI'?(done+' / '+total+' संकेतकों के अंक भरे'):(done+' / '+total+' indicators scored');
+  $('progressBar').style.width=(total?done/total*100:0)+'%';
+}
+
+function collectPayload(forDraft=false){
+  const p={reportType:STATE.form.type,clientToken:STATE.clientToken,formOpenedAt:STATE.openedAt?STATE.openedAt.toISOString():'',fillDuration:STATE.openedAt?Math.round((Date.now()-STATE.openedAt.getTime())/6000)/10:0,indicators:[]};
+  STATE.form.meta.forEach(f=>{const el=$('meta_'+f.key);p[f.key]=el?el.value:'';});
+  STATE.form.indicators.forEach((d,i)=>{
+    const suggestions=getSuggestionPoints(i); const first=suggestions[0]||{};
+    const a={score:$('score_'+i).value,observation:$('obs_'+i).value,suggestion:first.suggestion||'',timelineDate:first.timelineDate||'',completionDate:'',suggestions:suggestions};
+    (d.extraFields||[]).forEach(x=>{const el=$('extra_'+i+'_'+x.key);a[x.key]=el?el.value:'';}); p.indicators.push(a);
+  });
+  p.signoffName=$('signName').value; p.signoffDesignation=$('signDesignation').value; p.signoffDistrict=$('signDistrict').value; p.signoffZone=$('signZone').value;
+  p.followupAction=$('followupAction')?$('followupAction').value:'';
+  p.followupItems=((STATE.previousFollowup&&STATE.previousFollowup.items)||[]).map((x,i)=>({actionId:x.actionId,completionDate:($('fu_date_'+i)||{}).value||''}));
+  p.photoLocation=STATE.photoLocation||'';
+  if(!forDraft&&STATE.signatureDirty)p.signatureData=getSignatureData();
+  return p;
+}
+
+function draftKey(){return 'mw_draft_'+(STATE.user?STATE.user.id:'')+'_'+(STATE.form?STATE.form.type:'')+'_'+(STATE.editingId||'NEW')}
+function scheduleDraft(){clearTimeout(STATE.draftTimer);STATE.draftTimer=setTimeout(saveDraftNow,1800)}
+function saveDraftNow(){
+  if(!STATE.form)return; try{const d={savedAt:new Date().toISOString(),payload:collectPayload(true)};localStorage.setItem(draftKey(),JSON.stringify(d));if($('draftState'))$('draftState').textContent='Draft saved '+new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});}catch(e){}
+}
+function restoreDraftIfAny(){
+  try{const raw=localStorage.getItem(draftKey());if(!raw)return;const d=JSON.parse(raw);if(!d.payload)return;applyPrefill(d.payload);toast('Saved draft restored');}catch(e){}
+}
+function clearDraft(){try{localStorage.removeItem(draftKey())}catch(e){}}
+
+function applyPrefill(p){
+  if(!p)return;
+  if(p.clientToken)STATE.clientToken=p.clientToken;
+  STATE.form.meta.forEach(f=>{const el=$('meta_'+f.key);if(el&&p[f.key]!=null)el.value=p[f.key];});
+  if(p.cflName)syncCflSearchDisplay(p.cflName);
+  let followupPromise=Promise.resolve();
+  if(p.cflName){const c=STATE.cfls.find(x=>x.cflName===p.cflName);if(c){setAdjacentOptions(c,p.adjacentBlock);followupPromise=Promise.resolve(loadPreviousFollowup(p.cflName)).catch(()=>{});}}
+  (p.indicators||[]).forEach((a,i)=>{if(!$('score_'+i))return;$('score_'+i).value=a.score==null?'':a.score;document.querySelectorAll(`#indicator_${i} .score-chip`).forEach(b=>b.classList.toggle('active',String(b.dataset.score)===String(a.score)));$('obs_'+i).value=a.observation||'';const box=$('suggestions_'+i);if(box){const arr=(a.suggestions&&a.suggestions.length)?a.suggestions:[{suggestion:a.suggestion||'',timelineDate:a.timelineDate||''}];box.innerHTML=suggestionPointHtml(i,0,(arr[0]||{}).suggestion||'',(arr[0]||{}).timelineDate||'',false,true);arr.slice(1).forEach(x=>addSuggestionPoint(i,x));}(STATE.form.indicators[i].extraFields||[]).forEach(x=>{const el=$('extra_'+i+'_'+x.key);if(el)el.value=a[x.key]||'';});indicatorQuality(i);});
+  if(p.signoffName)$('signName').value=p.signoffName;if(p.signoffDesignation)$('signDesignation').value=p.signoffDesignation;if(p.signoffDistrict)$('signDistrict').value=p.signoffDistrict;if(p.signoffZone)$('signZone').value=p.signoffZone;
+  followupPromise.finally(()=>{if($('followupAction'))$('followupAction').value=p.followupAction||'';(p.followupItems||[]).forEach((x,i)=>{if($('fu_date_'+i))$('fu_date_'+i).value=x.completionDate||'';updateFollowupTatPreview(i);});});
+  updateProgress();
+}
+
+async function capturePhotoLocation(){
+  const loc=await getLocationString();
+  if(loc){STATE.photoLocation=loc;$('photoStatus').textContent='GPS: '+loc;toast('GPS captured');}else toast('Location unavailable. You can still submit.','err');
+}
+
+function getLocationString(){
+  return new Promise(resolve=>{
+    if(!navigator.geolocation){resolve('');return;}
+    navigator.geolocation.getCurrentPosition(p=>resolve(`${p.coords.latitude.toFixed(6)}, ${p.coords.longitude.toFixed(6)} (±${Math.round(p.coords.accuracy)}m)`),()=>resolve(''),{enableHighAccuracy:true,timeout:9000,maximumAge:30000});
+  });
+}
+
+async function handlePhotoInput(event){
+  const files=Array.from(event.target.files||[]); event.target.value='';
+  if(!files.length)return;
+  const left=(STATE.boot.config.maxPhotos||8)-STATE.photos.length;
+  if(left<=0){toast('Maximum photos already added.','err');return;}
+  if(!STATE.photoLocation)STATE.photoLocation=await getLocationString();
+  const chosen=files.slice(0,left);
+  for(let i=0;i<chosen.length;i++){
+    $('photoStatus').textContent=`Uploading photo ${i+1} of ${chosen.length}…`;
+    try{
+      const img=await compressImage(chosen[i]);
+      const r=await rpc('uploadPhoto',STATE.token,STATE.clientToken,{name:chosen[i].name.replace(/\.[^.]+$/,'.jpg'),mime:'image/jpeg',data:img.data,location:STATE.photoLocation});
+      STATE.photos.push({id:r.id,url:r.url,name:r.name,thumb:img.data}); renderPhotos();
+    }catch(e){toast('Photo failed: '+e.message,'err');}
+  }
+  $('photoStatus').textContent=STATE.photos.length+' photo(s) uploaded'+(STATE.photoLocation?' • GPS captured':'');
+}
+
+function compressImage(file){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onload=()=>{const img=new Image();img.onload=()=>{try{const max=1280,scale=Math.min(1,max/Math.max(img.width,img.height));const w=Math.max(1,Math.round(img.width*scale)),h=Math.max(1,Math.round(img.height*scale));const c=document.createElement('canvas');c.width=w;c.height=h;const ctx=c.getContext('2d');ctx.drawImage(img,0,0,w,h);resolve({data:c.toDataURL('image/jpeg',.74),width:w,height:h});}catch(e){reject(e)}};img.onerror=()=>reject(new Error('Invalid image'));img.src=reader.result};
+    reader.onerror=()=>reject(new Error('Cannot read image')); reader.readAsDataURL(file);
+  });
+}
+function renderPhotos(){
+  $('photoGrid').innerHTML=STATE.photos.map((p,i)=>`<div class="photo-thumb"><img src="${p.thumb}"><button type="button" onclick="removePhoto(${i})">×</button></div>`).join('');
+}
+async function removePhoto(i){
+  const p=STATE.photos[i]; if(!p)return;
+  try{await rpc('deleteStagedPhoto',STATE.token,STATE.clientToken,p.id);}catch(e){}
+  STATE.photos.splice(i,1); renderPhotos(); $('photoStatus').textContent=STATE.photos.length?STATE.photos.length+' photo(s) uploaded':'No photo uploaded.';
+}
+
+let sig={canvas:null,ctx:null,drawing:false,last:null};
+function initSignaturePad(){
+  const canvas=$('signatureCanvas'); if(!canvas)return;
+  const rect=canvas.getBoundingClientRect(), dpr=Math.min(window.devicePixelRatio||1,2); canvas.width=Math.max(300,Math.round(rect.width*dpr)); canvas.height=Math.round(150*dpr);
+  const ctx=canvas.getContext('2d'); ctx.scale(dpr,dpr); ctx.lineWidth=2; ctx.lineCap='round'; ctx.lineJoin='round'; ctx.strokeStyle='#162033'; sig={canvas,ctx,drawing:false,last:null};
+  const point=e=>{const r=canvas.getBoundingClientRect();return {x:e.clientX-r.left,y:e.clientY-r.top}};
+  canvas.onpointerdown=e=>{e.preventDefault();canvas.setPointerCapture(e.pointerId);sig.drawing=true;sig.last=point(e);STATE.signatureDirty=true;};
+  canvas.onpointermove=e=>{if(!sig.drawing)return;e.preventDefault();const p=point(e);ctx.beginPath();ctx.moveTo(sig.last.x,sig.last.y);ctx.lineTo(p.x,p.y);ctx.stroke();sig.last=p;};
+  const stop=()=>{sig.drawing=false;sig.last=null}; canvas.onpointerup=stop;canvas.onpointercancel=stop;canvas.onpointerleave=stop;
+}
+function clearSignature(){if(!sig.canvas)return;sig.ctx.clearRect(0,0,sig.canvas.width,sig.canvas.height);STATE.signatureDirty=false;}
+function getSignatureData(){return sig.canvas?sig.canvas.toDataURL('image/png'):''}
+
+function validateClientPayload(p){
+  const missing=[]; STATE.form.meta.forEach(f=>{if(f.required&&!String(p[f.key]||'').trim())missing.push(f.label)});
+  const missingScores=[]; p.indicators.forEach((a,i)=>{if(a.score==='')missingScores.push(STATE.form.indicators[i].sr)});
+  if(missing.length)throw new Error('Required: '+missing.join(', '));
+  if(missingScores.length)throw new Error('Score missing for indicator: '+missingScores.join(', '));
+  if(STATE.form.type==='SESSION'&&!p.sessionType)throw new Error('Type of Session required.');
+}
+
+async function submitCurrent(){
+  const btn=$('submitBtn'); let p=collectPayload(false);
+  try{validateClientPayload(p);}catch(e){toast(e.message,'err');return;}
+  if(!navigator.onLine){saveDraftNow();toast('Internet offline. Draft saved; reconnect then submit.','err');return;}
+  btn.disabled=true; busy(true,STATE.editingId?'Updating report & generating files…':'Saving data & generating PDF/Excel…');
+  try{
+    p.submitLocation=await getLocationString();
+    const r=STATE.editingId?await rpc('updateReport',STATE.token,STATE.editingId,STATE.form.type,p):await rpc('submitReport',STATE.token,p);
+    clearDraft(); renderSubmitSuccess(r);
+  }catch(e){saveDraftNow();toast(e.message,'err');}
+  finally{busy(false);if(btn)btn.disabled=false;}
+}
+
+function renderSubmitSuccess(r){
+  $('main').innerHTML=`<div class="card success-panel"><div class="success-icon">✓</div><h1>${r.reportError?'Data saved':'Report submitted successfully'}</h1><p><b>${esc(r.id)}</b> • Score ${esc(r.score||'–')}% • Grade ${esc(r.grade||'–')}</p>${r.reportError?`<div class="permission-note">Data Google Sheet me save ho gaya hai, lekin PDF/Excel generation me error aaya: ${esc(r.reportError)}. Regenerate button use karein.</div>`:''}${r.quality?`<div class="permission-note">Data quality note: ${esc(r.quality)}</div>`:''}<div class="actions" style="justify-content:center;margin-top:16px">${r.pdf?`<a class="btn primary" target="_blank" href="${esc(r.pdf)}">View PDF</a>`:''}${r.pdfDownload?`<a class="btn outline" target="_blank" href="${esc(r.pdfDownload)}">Download PDF</a>`:''}${r.excel?`<a class="btn secondary" target="_blank" href="${esc(r.excel)}">View Excel</a>`:''}${r.excelDownload?`<a class="btn outline" target="_blank" href="${esc(r.excelDownload)}">Download Excel</a>`:''}${r.reportError?`<button class="btn primary" onclick="regenerateUi('${esc(r.id)}','${esc(STATE.form.type)}')">Regenerate files</button>`:''}</div><div class="actions" style="justify-content:center;margin-top:22px"><button class="btn outline" onclick="showSubmissions()">My Submissions</button><button class="btn primary" onclick="newForm('${esc(STATE.form.type)}')">New ${STATE.form.type==='CFL'?'CFL Visit':'Session'} Form</button></div></div>`;
+}
+
+async function regenerateUi(id,type){busy(true,'Regenerating report files…');try{const r=await rpc('regenerateReport',STATE.token,id,type);toast('PDF/Excel regenerated');if(r.pdf)window.open(r.pdf,'_blank');}catch(e){toast(e.message,'err')}finally{busy(false)}}
+
+
+async function showFollowups(){
+  setActiveNav('followup');
+  busy(true,'Loading follow-up points…');
+  try{
+    const d=await rpc('getFollowupList',STATE.token);
+    const s=d.summary||{}, rows=d.items||[];
+    $('main').innerHTML=`<div class="page-head"><div><h1>Follow-up</h1><p class="muted">Open observation / action points for the CFLs in your access.</p></div></div>
+      <div class="followup-summary">
+        <div class="mini-stat"><b>${esc(s.cfls||0)}</b><span>Follow-up CFLs</span></div>
+        <div class="mini-stat"><b>${esc(s.open||0)}</b><span>Open points</span></div>
+        <div class="mini-stat"><b>${esc(s.overdue||0)}</b><span>Amber + Red</span></div>
+        <div class="mini-stat"><b>${esc(s.noTimeline||0)}</b><span>No timeline</span></div>
+      </div>
+      ${followupListTable(rows)}`;
+  }catch(e){toast(e.message,'err');$('main').innerHTML=`<div class="card empty">${esc(e.message)}</div>`;}
+  finally{busy(false);}
+}
+function followupListTable(rows){
+  if(!rows.length)return '<div class="card empty">No open follow-up points in your CFL access.</div>';
+  return `<div class="table-wrap"><table class="data-table followup-table"><thead><tr><th>CFL / BCC / District</th><th>Source Visit</th><th>Type</th><th>Indicator</th><th>Observation</th><th>Suggestion / Action</th><th>Timeline</th><th>TAT</th></tr></thead><tbody>${rows.map(x=>`<tr><td class="fu-place"><b>${esc(x.cfl||'–')}</b><br><span class="muted small">BCC ${esc(x.bcc||'–')} · ${esc(x.district||'–')}</span></td><td class="fu-date">${esc(x.visitDate||'–')}<br><span class="muted small">${esc(x.sourceSubmissionId||'')}</span></td><td>${esc(x.type||'–')}</td><td class="fu-indicator"><b>I${esc(x.indicatorSr||'')}</b> · ${esc(x.indicatorTitle||'–')}</td><td class="fu-text">${nl2br(x.observation||'–')}</td><td class="fu-text">${nl2br(x.suggestion||'–')}</td><td class="fu-date">${esc(x.timelineDate||'–')}</td><td><span class="tat-pill tat-${String(x.tatStatus||'pending').toLowerCase()}">${esc(x.tatLabel||x.tatStatus||'Pending')}</span></td></tr>`).join('')}</tbody></table></div>`;
+}
+
+async function showSubmissions(){
+  setActiveNav('submissions');
+  $('main').innerHTML=`<div class="page-head"><div><h1>My Submissions</h1><p class="muted">View, download, or request edit permission.</p></div></div><div class="filter-bar"><select id="subType" onchange="loadSubmissions()"><option value="">All reports</option><option value="CFL">CFL Visit</option><option value="SESSION">Session</option></select><input id="subSearch" placeholder="Search CFL, district, ID" oninput="debounceLoadSubs()"></div><div id="subList"></div>`;
+  await loadSubmissions();
+}
+let subTimer;
+function debounceLoadSubs(){clearTimeout(subTimer);subTimer=setTimeout(loadSubmissions,350)}
+async function loadSubmissions(){
+  const type=$('subType')?$('subType').value:'', q=$('subSearch')?$('subSearch').value:''; const box=$('subList'); if(!box)return; box.innerHTML='<div class="card empty">Loading…</div>';
+  try{const rows=await rpc('getMySubmissions',STATE.token,type,q);box.innerHTML=rows.length?`<div class="report-list">${rows.map(mySubmissionCard).join('')}</div>`:'<div class="card empty">No matching submissions.</div>';}catch(e){box.innerHTML='<div class="card error-text">'+esc(e.message)+'</div>';}
+}
+function mySubmissionCard(r){
+  const grade=esc(r.grade||''); let edit='';
+  if(STATE.user.role!=='ADMIN'){
+    if(r.canEdit)edit=`<button class="btn success" onclick="editSubmission('${esc(r.id)}','${esc(r.type)}')">Edit Now</button>`;
+    else if(r.editStatus==='Pending')edit='<span class="pill">Edit Pending</span>';
+    else if(r.editStatus==='Rejected')edit=`<button class="btn outline" onclick="requestEditUi('${esc(r.id)}','${esc(r.type)}')">Request Again</button>`;
+    else edit=`<button class="btn outline" onclick="requestEditUi('${esc(r.id)}','${esc(r.type)}')">Request Edit</button>`;
+  }
+  return `<div class="card report-card"><div><div class="id">${esc(r.id)}</div><div>${esc(r.cfl)} • ${esc(r.district)}</div><div class="meta">${esc(r.type)} • ${esc(r.visitDate)} • v${esc(r.reportVersion||1)}</div></div><div>${esc(r.officer||'')}</div><div class="score-badge grade-${grade}">${esc(r.score||'–')}% ${grade}</div><div class="actions"><button class="btn outline" onclick="viewSubmission('${esc(r.id)}','${esc(r.type)}')">View</button>${r.pdf?`<a class="btn secondary" target="_blank" href="${esc(r.pdf)}">PDF</a>`:''}${r.excel?`<a class="btn secondary" target="_blank" href="${esc(r.excel)}">Excel</a>`:''}${edit}${(!r.pdf||!r.excel)?`<button class="btn outline" onclick="regenerateUi('${esc(r.id)}','${esc(r.type)}')">Regenerate</button>`:''}</div></div>`;
+}
+
+function requestEditUi(id,type){
+  openModal(`<div class="modal-head"><h3>Request Edit Permission</h3><button class="close-btn" onclick="closeModal()">×</button></div><p class="muted">Submission: <b>${esc(id)}</b></p><label>Reason for edit / बदलाव का कारण<textarea id="editReason" placeholder="What needs to be corrected?"></textarea></label><div class="actions" style="justify-content:flex-end"><button class="btn outline" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="sendEditRequest('${esc(id)}','${esc(type)}')">Send Request</button></div>`);
+}
+async function sendEditRequest(id,type){const reason=$('editReason').value.trim();if(!reason){toast('Reason required','err');return;}busy(true,'Sending edit request…');try{const r=await rpc('requestEdit',STATE.token,id,type,reason);closeModal();toast(r.message||'Edit request sent');loadSubmissions();}catch(e){toast(e.message,'err')}finally{busy(false)}}
+async function editSubmission(id,type){busy(true,'Opening approved edit…');try{const r=await rpc('getSubmissionForEdit',STATE.token,id,type);r.payload.__id=id;r.payload.__requestId=r.requestId;await newForm(type,r.payload);}catch(e){toast(e.message,'err')}finally{busy(false)}}
+
+async function viewSubmission(id,type){
+  busy(true,'Loading report details…');
+  try{const d=await rpc('getSubmissionDetails',STATE.token,id,type);openModal(detailHtml(d));}catch(e){toast(e.message,'err')}finally{busy(false)}
+}
+function detailHtml(d){
+  const m=d.meta||{}, c=d.card||{};
+  return `<div class="modal-head"><div><h3>${esc(c.id)} — ${esc(c.cfl)}</h3><div class="muted small">${esc(c.type)} • ${esc(m.visitDate)} • Score ${esc(c.score)}% Grade ${esc(c.grade)}</div></div><button class="close-btn" onclick="closeModal()">×</button></div><div class="actions">${c.pdf?`<a class="btn primary" target="_blank" href="${esc(c.pdf)}">PDF</a>`:''}${c.excel?`<a class="btn secondary" target="_blank" href="${esc(c.excel)}">Excel</a>`:''}${c.folder?`<a class="btn outline" target="_blank" href="${esc(c.folder)}">Drive Folder</a>`:''}</div><div style="margin-top:14px">${[['CFL',m.cflName],['District',m.district],['BCC Code',m.bccCode],['Block',m.adjacentBlock],['Officer',m.officerName],['Designation',m.officerDesignation],['GPS',m.submitLocation],['Fill Duration',m.fillDuration?m.fillDuration+' min':'']].map(x=>`<div class="detail-row"><b>${esc(x[0])}</b><div>${esc(x[1]||'–')}</div></div>`).join('')}</div><h3>Indicators</h3>${(d.indicators||[]).map(x=>`<div class="detail-indicator"><h4>${esc(x.sr)}. ${esc(x.titleEn)} <span class="pill">Score ${esc(x.score)}</span></h4><div><b>Observation:</b> ${nl2br(x.observation||'–')}</div><div><b>Suggestion:</b> ${nl2br(x.suggestion||'–')}</div>${(x.suggestions||[]).length?`<div class="detail-actions">${x.suggestions.map((a,j)=>`<div class="small"><b>${j+1}.</b> ${esc(a.suggestion||'')} · Timeline ${esc(a.timelineDate||'–')} · Completion ${esc(a.completionDate||'Pending')} ${a.tatStatus?`· ${esc(a.tatStatus)}${a.tatDays?` (${esc(a.tatDays)} TAT days)`:''}`:''}</div>`).join('')}</div>`:(x.timelineDate?`<div class="small muted">Timeline: ${esc(x.timelineDate)} • Completion: ${esc(x.completionDate||'Pending')}</div>`:'')}</div>`).join('')}</div>`;
+}
+
+async function showAdmin(){
+  setActiveNav('admin'); busy(true,'Loading admin panel…');
+  try{STATE.adminOverview=await rpc('getAdminOverview',STATE.token);$('main').innerHTML=adminShellHtml();await adminTab('overview');}
+  catch(e){toast(e.message,'err')}finally{busy(false)}
+}
+function adminShellHtml(){
+  const u=STATE.adminOverview.user, viewOnly=u.permission==='VIEW';
+  return `<div class="page-head"><div><h1>Admin Panel</h1><p class="muted">Submissions, edit approvals, staff mapping, CFL master and admin access.</p></div></div>${viewOnly?'<div class="permission-note">This Admin ID is View-only. Data can be viewed/downloaded but cannot be changed.</div>':''}<div class="tabs"><button class="tab-btn active" data-tab="overview" onclick="adminTab('overview')">Overview & Reports</button><button class="tab-btn" data-tab="monitoring" onclick="adminTab('monitoring')">Monitoring & Reminders</button><button class="tab-btn" data-tab="edits" onclick="adminTab('edits')">Edit Requests</button><button class="tab-btn" data-tab="staff" onclick="adminTab('staff')">Staff & PIN</button><button class="tab-btn" data-tab="cfl" onclick="adminTab('cfl')">CFL / Block</button><button class="tab-btn" data-tab="admins" onclick="adminTab('admins')">Admin IDs</button></div><div id="adminBody"></div>`;
+}
+async function adminTab(tab){
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
+  if(tab==='overview')return renderAdminOverview();
+  if(tab==='monitoring')return loadAdminMonitoring();
+  if(tab==='edits')return loadAdminEdits();
+  if(!STATE.adminMasters){busy(true,'Loading master data…');try{STATE.adminMasters=await rpc('getAdminMasters',STATE.token);}catch(e){toast(e.message,'err');return;}finally{busy(false)}}
+  if(tab==='staff')renderAdminStaff(); if(tab==='cfl')renderAdminCfl(); if(tab==='admins')renderAdminUsers();
+}
+function renderAdminOverview(){
+  const o=STATE.adminOverview,d=o.dashboard,c=d.counts||{},m=o.masterCounts||{};
+  $('adminBody').innerHTML=`<div class="grid kpis">${kpi(c.total||0,'All submissions')}${kpi(c.today||0,'Today')}${kpi((d.averageScore||0)+'%','Average score')}${kpi(c.pendingEdits||0,'Pending edits')}${kpi(m.cfls||0,'CFL master')}</div><h2 class="section-title">Filter submissions</h2><div class="filter-bar"><input id="aSearch" placeholder="ID / CFL / officer"><select id="aType"><option value="">All types</option><option>CFL</option><option value="SESSION">SESSION</option></select><input id="aDistrict" placeholder="District"><input id="aCfl" placeholder="CFL"><input id="aFrom" type="date"><input id="aTo" type="date"></div><div class="actions" style="margin-bottom:12px"><button class="btn primary" onclick="loadAdminSubmissions()">Apply Filter</button><button class="btn outline" onclick="clearAdminFilters()">Clear</button></div><div id="adminSubs"></div>`;
+  loadAdminSubmissions();
+}
+function clearAdminFilters(){['aSearch','aDistrict','aCfl','aFrom','aTo'].forEach(id=>$(id).value='');$('aType').value='';loadAdminSubmissions()}
+async function loadAdminSubmissions(){
+  const box=$('adminSubs');if(!box)return;box.innerHTML='<div class="card empty">Loading reports…</div>';
+  const f={search:$('aSearch').value,type:$('aType').value,district:$('aDistrict').value,cfl:$('aCfl').value,from:$('aFrom').value,to:$('aTo').value};
+  try{const rows=await rpc('getAdminSubmissions',STATE.token,f);box.innerHTML=adminSubTable(rows);}catch(e){box.innerHTML='<div class="error-text">'+esc(e.message)+'</div>'}
+}
+function adminSubTable(rows){
+  if(!rows.length)return '<div class="card empty">No matching reports.</div>';
+  return `<div class="table-wrap"><table class="data-table"><thead><tr><th>ID</th><th>Type</th><th>Date</th><th>CFL / District</th><th>Officer</th><th>Score</th><th>Files</th><th>Action</th></tr></thead><tbody>${rows.map(r=>`<tr><td><b>${esc(r.id)}</b><br><span class="muted">v${esc(r.reportVersion||1)}</span></td><td>${esc(r.type)}</td><td>${esc(r.visitDate)}</td><td>${esc(r.cfl)}<br><span class="muted">${esc(r.district)}</span></td><td>${esc(r.officer)}</td><td><span class="pill grade-${esc(r.grade)}">${esc(r.score)}% ${esc(r.grade)}</span></td><td>${r.pdf?`<a class="link-btn" target="_blank" href="${esc(r.pdf)}">PDF</a>`:'–'} ${r.excel?` · <a class="link-btn" target="_blank" href="${esc(r.excel)}">Excel</a>`:''}</td><td><button class="link-btn" onclick="viewSubmission('${esc(r.id)}','${esc(r.type)}')">View</button> · <button class="link-btn" onclick="regenerateUi('${esc(r.id)}','${esc(r.type)}')">Regenerate</button></td></tr>`).join('')}</tbody></table></div>`;
+}
+
+async function loadAdminMonitoring(){
+  const box=$('adminBody');box.innerHTML='<div class="card empty">Loading monitoring status…</div>';
+  try{const d=await rpc('getAdminMonitoring',STATE.token);window._mwMonitoring=d;box.innerHTML=adminMonitoringHtml(d);}catch(e){box.innerHTML='<div class="error-text">'+esc(e.message)+'</div>'}
+}
+function adminMonitoringHtml(d){
+  const s=d.summary||{}, auto=d.reminderAutomation||{}, canWrite=STATE.user.permission!=='VIEW', full=STATE.user.permission==='ADMIN';
+  return `<div class="page-head"><div><h2 style="margin:0">Monitoring & Follow-up Control</h2><p class="muted">Who visited where, pending observations, completion coverage and overdue reminders.</p></div><div class="actions">${full?`<button class="btn ${auto.enabled?'danger':'success'}" onclick="toggleDailyReminder(${auto.enabled?'false':'true'})">${auto.enabled?'Disable':'Enable'} Daily 8 AM Reminder</button>`:''}</div></div>
+    <div class="grid kpis">${kpi(s.totalVisits||0,'Total visits')}${kpi(s.officers||0,'Officers')}${kpi(s.actionPoints||0,'Action points')}${kpi(s.completedActions||0,'Covered')}${kpi(s.openActions||0,'Open')}${kpi(s.red||0,'Red / TAT')}${kpi(s.noTimeline||0,'Missing Timeline')}</div>
+    <div class="permission-note">Automatic reminder status: <b>${auto.enabled?'ON — daily around 8 AM':'OFF'}</b>. Reminder emails are consolidated: one email per officer with all overdue points.</div>
+    <h2 class="section-title">Officer-wise monitoring</h2>${officerMonitoringTable(d.officers||[],canWrite)}
+    <h2 class="section-title">CFL-wise visit & follow-up status</h2>${cflMonitoringTable(d.cfls||[])}`;
+}
+function officerMonitoringTable(rows,canWrite){
+  if(!rows.length)return '<div class="card empty">No visit data.</div>';
+  return `<div class="table-wrap"><table class="data-table monitoring-table"><thead><tr><th>ID / Officer</th><th>District</th><th>Visits</th><th>Last Visit</th><th>Action Points</th><th>Covered</th><th>Open</th><th>Amber</th><th>Red</th><th>No Timeline</th><th>Coverage</th><th>Reminder</th></tr></thead><tbody>${rows.map(o=>`<tr><td><b>${esc(o.consultantId||'–')}</b><br>${esc(o.name||'–')}<br><span class="muted small">${esc(o.email||'No email')}</span></td><td>${esc(o.district||'–')}</td><td><b>${esc(o.totalVisits||0)}</b><br><span class="muted small">CFL ${esc(o.cflVisits||0)} · Session ${esc(o.sessionVisits||0)}</span></td><td>${esc(o.lastVisitDate||'–')}<br><span class="muted small">${esc(o.lastVisitCfl||'–')} · ${esc(o.lastVisitType||'')}</span></td><td>${esc(o.actionPoints||0)}</td><td>${esc(o.completedActions||0)}</td><td>${esc(o.openActions||0)}</td><td><span class="pill tat-amber">${esc(o.amber||0)}</span></td><td><span class="pill tat-red">${esc(o.red||0)}</span></td><td>${esc(o.noTimeline||0)}</td><td>${esc(o.completionPct||0)}%</td><td>${canWrite&&o.canRemind?`<button class="btn outline compact-btn" onclick="sendMonitoringReminder('${esc(o.consultantId||o.email||o.name)}')">Email Reminder</button>`:'–'}</td></tr>`).join('')}</tbody></table></div>`;
+}
+function cflMonitoringTable(rows){
+  if(!rows.length)return '<div class="card empty">No CFL visit data.</div>';
+  return `<div class="table-wrap"><table class="data-table monitoring-table"><thead><tr><th>CFL / District</th><th>Total Visits</th><th>Last Visit</th><th>Last Officer</th><th>Open</th><th>Covered</th><th>Amber</th><th>Red</th><th>No Timeline</th><th>Next Timeline</th></tr></thead><tbody>${rows.map(c=>`<tr><td><b>${esc(c.cfl||'–')}</b><br><span class="muted">${esc(c.district||'')}</span></td><td>${esc(c.totalVisits||0)}<br><span class="muted small">CFL ${esc(c.cflVisits||0)} · Session ${esc(c.sessionVisits||0)}</span></td><td>${esc(c.lastVisitDate||'–')}</td><td>${esc(c.lastOfficer||'–')}</td><td>${esc(c.openActions||0)}</td><td>${esc(c.completedActions||0)}</td><td><span class="pill tat-amber">${esc(c.amber||0)}</span></td><td><span class="pill tat-red">${esc(c.red||0)}</span></td><td>${esc(c.noTimeline||0)}</td><td>${esc(c.nextTimeline||'–')}</td></tr>`).join('')}</tbody></table></div>`;
+}
+async function sendMonitoringReminder(id){
+  if(!confirm('Send one consolidated overdue follow-up reminder email to this officer?'))return;
+  busy(true,'Sending follow-up reminder…');try{const r=await rpc('sendOfficerFollowupReminder',STATE.token,id);toast(r.sent?`Reminder sent (${r.count} point(s))`:(r.message||'No overdue points'));if(r.sent)loadAdminMonitoring();}catch(e){toast(e.message,'err')}finally{busy(false)}
+}
+async function toggleDailyReminder(enabled){
+  busy(true,enabled?'Enabling daily reminder…':'Disabling daily reminder…');try{await rpc('setDailyFollowupReminder',STATE.token,enabled);toast(enabled?'Daily 8 AM reminder enabled':'Daily reminder disabled');loadAdminMonitoring();}catch(e){toast(e.message,'err')}finally{busy(false)}
+}
+
+async function loadAdminEdits(){
+  const box=$('adminBody');box.innerHTML='<div class="card empty">Loading edit requests…</div>';
+  try{const rows=await rpc('getAdminEditRequests',STATE.token,'');box.innerHTML=`<div class="page-head"><div><h2 style="margin:0">Edit Requests</h2><p class="muted">Approve gives AM/CBO temporary edit permission.</p></div><select id="editStatusFilter" style="width:auto" onchange="filterEditRows()"><option value="">All</option><option>Pending</option><option>Approved</option><option>Rejected</option><option>Edited</option></select></div><div id="editRows">${editTable(rows)}</div>`;window._adminEditRows=rows;}catch(e){box.innerHTML='<div class="error-text">'+esc(e.message)+'</div>'}
+}
+function filterEditRows(){const s=$('editStatusFilter').value;const rows=(window._adminEditRows||[]).filter(r=>!s||r.Status===s);$('editRows').innerHTML=editTable(rows)}
+function editTable(rows){
+  if(!rows.length)return '<div class="card empty">No requests.</div>';
+  const canWrite=STATE.user.permission!=='VIEW';
+  return `<div class="table-wrap"><table class="data-table"><thead><tr><th>Request</th><th>Submission</th><th>Requested By</th><th>Reason</th><th>Status</th><th>Action</th></tr></thead><tbody>${rows.map(r=>`<tr><td><b>${esc(r['Request ID'])}</b><br><span class="muted">${esc(r['Requested At'])}</span></td><td>${esc(r['Submission ID'])}<br><span class="muted">${esc(r['Report Type'])}</span></td><td>${esc(r['Requested By'])}</td><td>${esc(r.Reason)}</td><td><span class="pill">${esc(r.Status)}</span>${r['Edit Expires At']?`<br><span class="muted">Until ${esc(r['Edit Expires At'])}</span>`:''}</td><td>${r.Status==='Pending'&&canWrite?`<button class="btn success" onclick="decisionModal('${esc(r['Request ID'])}',true)">Approve</button> <button class="btn danger" onclick="decisionModal('${esc(r['Request ID'])}',false)">Reject</button>`:'–'}</td></tr>`).join('')}</tbody></table></div>`;
+}
+function decisionModal(id,approve){openModal(`<div class="modal-head"><h3>${approve?'Approve':'Reject'} Edit Request</h3><button class="close-btn" onclick="closeModal()">×</button></div>${approve?'<label>Permission hours<input id="decisionHours" type="number" min="1" max="168" value="24"></label>':''}<label>Admin note<textarea id="decisionNote" placeholder="Optional note"></textarea></label><div class="actions" style="justify-content:flex-end"><button class="btn outline" onclick="closeModal()">Cancel</button><button class="btn ${approve?'success':'danger'}" onclick="decideRequest('${esc(id)}',${approve})">${approve?'Approve':'Reject'}</button></div>`)}
+async function decideRequest(id,approve){const note=$('decisionNote').value,hours=approve?$('decisionHours').value:24;busy(true,'Updating request…');try{await rpc('decideEditRequest',STATE.token,id,approve?'APPROVE':'REJECT',note,hours);closeModal();toast(approve?'Edit permission approved':'Request rejected');loadAdminEdits();}catch(e){toast(e.message,'err')}finally{busy(false)}}
+
+function renderAdminStaff(){
+  const m=STATE.adminMasters,canWrite=STATE.user.permission!=='VIEW';
+  $('adminBody').innerHTML=`<h2>Area Manager / Employee Mapping</h2><div class="card admin-form"><label>Consultant ID<input id="am_id"></label><label>Name<input id="am_name"></label><label>Designation<input id="am_desig" value="Area Manager"></label><label>Email<input id="am_email"></label><label>State<input id="am_state" value="Uttar Pradesh"></label><label>District<input id="am_dist"></label><label>Zone<input id="am_zone"></label><label>CFL Name<select id="am_cfl"><option value="" data-en="Select CFL" data-hi="CFL चुनें">Select CFL</option>${STATE.cfls.map(c=>`<option>${esc(c.cflName)}</option>`).join('')}</select></label><label class="check-row"><input id="am_replace" type="checkbox"> Transfer: replace existing CFL mappings</label>${canWrite?'<button class="btn primary" onclick="saveAmUi()">Save AM / Transfer</button>':''}</div>
+    <h2 class="section-title">CBO</h2><p class="muted small">CBO CFL access is automatic: Cbo Master District → all CFLs in the same District from CFL Master.</p><div class="card admin-form"><label>Consultant ID<input id="cbo_id"></label><label>Name<input id="cbo_name"></label><label>District<input id="cbo_dist"></label><label>Official Email<input id="cbo_email"></label><label>Mobile<input id="cbo_mobile"></label>${canWrite?'<button class="btn primary" onclick="saveCboUi()">Save CBO</button>':''}</div>
+    <h2 class="section-title">Current staff mappings</h2>${simpleMasterTable(m.employees.slice(0,150),['Consultant Id','Name','Designation','District','CFL Name','Email'])}`;
+}
+function simpleMasterTable(rows,cols){if(!rows.length)return '<div class="card empty">No data.</div>';return `<div class="table-wrap"><table class="data-table"><thead><tr>${cols.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td>${esc(r[c]||'')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`}
+async function saveAmUi(){const d={consultantId:$('am_id').value,name:$('am_name').value,designation:$('am_desig').value,email:$('am_email').value,state:$('am_state').value,district:$('am_dist').value,zone:$('am_zone').value,cflName:$('am_cfl').value,replaceExisting:$('am_replace').checked,loginExempt:false};busy(true,'Saving employee mapping…');try{await rpc('saveEmployeeMapping',STATE.token,d);STATE.adminMasters=null;toast('Employee mapping saved');await adminTab('staff')}catch(e){toast(e.message,'err')}finally{busy(false)}}
+async function saveCboUi(){const d={consultantId:$('cbo_id').value,name:$('cbo_name').value,district:$('cbo_dist').value,email:$('cbo_email').value,mobile:$('cbo_mobile').value};busy(true,'Saving CBO…');try{await rpc('saveCbo',STATE.token,d);STATE.adminMasters=null;toast('CBO saved');await adminTab('staff')}catch(e){toast(e.message,'err')}finally{busy(false)}}
+
+function renderAdminCfl(){
+  const m=STATE.adminMasters,canWrite=STATE.user.permission!=='VIEW';
+  const rows=(m.cfls||[]).slice().sort((a,b)=>String(a['CFL Name']||'').localeCompare(String(b['CFL Name']||'')));
+  $('adminBody').innerHTML=`<h2>CFL / Block Master</h2><p class="muted">Select an existing CFL. BCC, phase, bank, state, district and base block are fetched automatically. Only Adjacent Block 1 and Adjacent Block 2 can be changed here.</p>
+    <div class="card admin-form cfl-block-admin-form">
+      <label class="admin-cfl-select">CFL Name / BCC Code<select id="cf_select" onchange="loadAdminCflBlock(this.value)"><option value="">Select CFL / BCC</option>${rows.map(r=>`<option value="${esc(r['BCC Code']||r['CFL Name']||'')}">${esc(r['CFL Name']||'')} — BCC ${esc(r['BCC Code']||'–')} — ${esc(r.District||'')}</option>`).join('')}</select></label>
+      <label>BCC Code<input id="cf_bcc" readonly></label>
+      <label>Phase<input id="cf_phase" readonly></label>
+      <label>Bank Name<input id="cf_bank" readonly></label>
+      <label>State<input id="cf_state" readonly></label>
+      <label>District<input id="cf_dist" readonly></label>
+      <label>Base Block<input id="cf_base" readonly></label>
+      <label class="editable-block">Adjacent Block 1<input id="cf_a1" placeholder="Enter Adjacent Block 1"></label>
+      <label class="editable-block">Adjacent Block 2<input id="cf_a2" placeholder="Enter Adjacent Block 2"></label>
+      ${canWrite?'<button id="cf_save" class="btn primary" onclick="saveCflUi()" disabled>Save Adjacent Blocks</button>':''}
+    </div>
+    <div class="hint">Saved blocks will automatically appear in AM/CBO CFL Entry and Session <b>Visit Block / Adjacent Block</b> dropdown for this CFL.</div>
+    <h2 class="section-title">Current CFL / Block Mapping</h2>${simpleMasterTable(rows.slice(0,400),['CFL Name','BCC Code','Phase','District','Base Block','Adjacent Block 1','Adjacent Block 2','Bank Name'])}`;
+}
+function loadAdminCflBlock(key){
+  const m=STATE.adminMasters||{}, rows=m.cfls||[], ovs=m.overrides||[];
+  const norm=v=>String(v==null?'':v).trim().replace(/\.0$/,'').toLowerCase();
+  const r=rows.find(x=>norm(x['BCC Code'])===norm(key)||norm(x['CFL Name'])===norm(key));
+  if(!r){['cf_bcc','cf_phase','cf_bank','cf_state','cf_dist','cf_base','cf_a1','cf_a2'].forEach(id=>{if($(id))$(id).value=''});if($('cf_save'))$('cf_save').disabled=true;return;}
+  const ov=ovs.find(x=>norm(x['BCC Code'])===norm(r['BCC Code'])||norm(x['CFL Name'])===norm(r['CFL Name']));
+  const values={cf_bcc:r['BCC Code'],cf_phase:r.Phase,cf_bank:r['Bank Name'],cf_state:r.State,cf_dist:r.District,cf_base:r['Base Block'],cf_a1:(ov&&ov['Adjacent Block 1'])||r['Adjacent Block 1'],cf_a2:(ov&&ov['Adjacent Block 2'])||r['Adjacent Block 2']};
+  Object.entries(values).forEach(([id,v])=>{if($(id))$(id).value=v||''});
+  if($('cf_save'))$('cf_save').disabled=false;
+}
+async function saveCflUi(){
+  const key=$('cf_select').value;if(!key){toast('Select a CFL first','err');return;}
+  const m=STATE.adminMasters||{}, rows=m.cfls||[];
+  const norm=v=>String(v==null?'':v).trim().replace(/\.0$/,'').toLowerCase();
+  const r=rows.find(x=>norm(x['BCC Code'])===norm(key)||norm(x['CFL Name'])===norm(key));
+  if(!r){toast('Selected CFL not found','err');return;}
+  const d={cflName:r['CFL Name'],bccCode:r['BCC Code'],adjacent1:$('cf_a1').value,adjacent2:$('cf_a2').value};
+  busy(true,'Saving adjacent blocks…');
+  try{
+    await rpc('saveCflAdjacentBlocks',STATE.token,d);
+    STATE.adminMasters=await rpc('getAdminMasters',STATE.token);
+    STATE.cfls=await rpc('getCflOptions',STATE.token);
+    toast('Adjacent blocks saved for '+(r['CFL Name']||''));
+    renderAdminCfl();
+    const sel=$('cf_select');if(sel){sel.value=String(r['BCC Code']||r['CFL Name']||'');loadAdminCflBlock(sel.value);}
+  }catch(e){toast(e.message,'err')}finally{busy(false)}
+}
+
+function renderAdminUsers(){
+  const m=STATE.adminMasters,full=STATE.user.permission==='ADMIN';
+  $('adminBody').innerHTML=`<h2>Admin IDs</h2>${full?`<div class="card admin-form"><label>Email<input id="ad_email"></label><label>Display Name<input id="ad_name"></label><label>Permission<select id="ad_perm"><option>VIEW</option><option>EDIT</option><option>ADMIN</option></select></label><label class="check-row"><input id="ad_active" type="checkbox" checked> Active</label><button class="btn primary" onclick="saveAdminUi()">Create / Update Admin</button></div>`:'<div class="permission-note">Only Full ADMIN can create or change Admin IDs.</div>'}<h2 class="section-title">Current Admin Users</h2>${simpleMasterTable(m.admins,['Email','Display Name','Permission','Active','Added At'])}<div class="card" style="margin-top:14px"><b>Permissions</b><p class="muted small"><b>VIEW:</b> reports and dashboards only. <b>EDIT:</b> approvals + staff/CFL changes. <b>ADMIN:</b> full access including Admin ID management.</p></div>`;
+}
+async function saveAdminUi(){const d={email:$('ad_email').value,displayName:$('ad_name').value,permission:$('ad_perm').value,adminPin:'',active:$('ad_active').checked};busy(true,'Saving admin…');try{await rpc('saveAdminUser',STATE.token,d);STATE.adminMasters=null;toast('Admin ID saved');await adminTab('admins')}catch(e){toast(e.message,'err')}finally{busy(false)}}
+
+</script>
