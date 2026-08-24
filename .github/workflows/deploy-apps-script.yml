@@ -41,5 +41,5 @@ jobs:
           echo "number=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Redeploy existing Web App
-        if: ${{ secrets.APPS_SCRIPT_DEPLOYMENT_ID != '' }}
+        if: ${{ env.APPS_SCRIPT_DEPLOYMENT_ID != '' }}
         run: npx --yes @google/clasp redeploy "${{ secrets.APPS_SCRIPT_DEPLOYMENT_ID }}" "${{ steps.version.outputs.number }}" "GitHub ${GITHUB_SHA::7}"
